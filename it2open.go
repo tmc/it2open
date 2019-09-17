@@ -22,6 +22,7 @@ var (
 	flagCols   = flag.Int("cols", 4, "number of columns")
 	flagNewTab = flag.Bool("tab", true, "if true, open a new tab")
 	flagDebug  = flag.Bool("debug", false, "if true, dump out applescript instead of running it")
+	flagDelay  = flag.Float64("delay", 0.25, "delay in seconds")
 )
 
 const tmpl = `
@@ -44,26 +45,27 @@ tell application "iTerm2"
     repeat with currentLayout in items of layout
       tell application "System Events" to keystroke currentLayout using command down
     end repeat
-      repeat with currentPane in items of panes
-        tell the current session
-          delay 0.25
-          write text cmd of currentPane
-          tell application "System Events" to keystroke "]" using command down
-        end tell
-      end repeat
+    delay {% .Delay %}
+    repeat with currentPane in items of panes
+      tell the current session
+        delay 0.25
+        write text cmd of currentPane
+        tell application "System Events" to keystroke "]" using command down
+      end tell
+    end repeat
   end tell
 end tell
 `
 
 func main() {
 	flag.Parse()
-	if err := run(*flagCols, *flagNewTab, *flagDebug); err != nil {
+	if err := run(*flagCols, *flagNewTab, *flagDelay, *flagDebug); err != nil {
 		fmt.Fprintf(os.Stderr, "it2open: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(cols int, newTab bool, debug bool) error {
+func run(cols int, newTab bool, delay float64, debug bool) error {
 	var t = template.Must(template.New("applescript-template").Delims("{%", "%}").Parse(tmpl))
 	cmds, err := splitStdin()
 	if err != nil {
@@ -76,12 +78,14 @@ func run(cols int, newTab bool, debug bool) error {
 	ctx := struct {
 		Cols       int
 		Rows       int
+		Delay      float64
 		Cmds       []string
 		LayoutCmds []string
 		NewTab     bool
 	}{
 		Cols:       cols,
 		Rows:       rows,
+		Delay:      delay,
 		Cmds:       cmds,
 		LayoutCmds: mkLayoutCmds(cols, rows),
 		NewTab:     newTab,
