@@ -6,7 +6,7 @@ it2open opens iTerm2 panes and runs the commands provided on stdin.
 Installation:
 
 ```sh
-$ go get github.com/tmc/it2open
+$ go install github.com/tmc/it2open@latest
 ```
 
 Example:
