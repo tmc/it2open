@@ -6,13 +6,13 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"html/template"
 	"io"
 	"io/ioutil"
 	"log"
 	"math"
 	"os"
 	"os/exec"
+	"text/template"
 
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/ssh/terminal"
@@ -25,38 +25,6 @@ var (
 	flagDelay  = flag.Float64("delay", 0.25, "delay in seconds")
 )
 
-const tmpl = `
-tell application "iTerm2"
-  tell current window
-    {% if .NewTab %}
-    create tab with default profile
-    {% else %}
-    # use current tab
-    {% end %}
-    set panes to {}
-    {% range .Cmds -%}
-    set panes to panes & {{cmd:"{% . %}"}}
-    {% end -%}
-    set layout to {}
-    {% range .LayoutCmds -%}
-    set layout to layout & {{"{% . %}"}}
-    {% end -%}
-    #repeat with i from 1 to n
-    repeat with currentLayout in items of layout
-      tell application "System Events" to keystroke currentLayout using command down
-    end repeat
-    delay {% .Delay %}
-    repeat with currentPane in items of panes
-      tell the current session
-        delay 0.25
-        write text cmd of currentPane
-        tell application "System Events" to keystroke "]" using command down
-      end tell
-    end repeat
-  end tell
-end tell
-`
-
 func main() {
 	flag.Parse()
 	if err := run(*flagCols, *flagNewTab, *flagDelay, *flagDebug); err != nil {
@@ -66,85 +34,123 @@ func main() {
 }
 
 func run(cols int, newTab bool, delay float64, debug bool) error {
-	var t = template.Must(template.New("applescript-template").Delims("{%", "%}").Parse(tmpl))
 	cmds, err := splitStdin()
 	if err != nil {
 		return errors.Wrap(err, "reading stdin")
 	}
-	rows := int(math.Ceil(float64(len(cmds)) / float64(cols)))
-	if len(cmds) < cols {
-		cols = len(cmds)
-	}
+
+	rows := (len(cmds) + cols - 1) / cols
+
 	ctx := struct {
-		Cols       int
-		Rows       int
-		Delay      float64
-		Cmds       []string
-		LayoutCmds []string
-		NewTab     bool
+		Cols   int
+		Rows   int
+		Delay  float64
+		Cmds   []string
+		NewTab bool
 	}{
-		Cols:       cols,
-		Rows:       rows,
-		Delay:      delay,
-		Cmds:       cmds,
-		LayoutCmds: mkLayoutCmds(cols, rows),
-		NewTab:     newTab,
+		Cols:   cols,
+		Rows:   rows,
+		Delay:  delay,
+		Cmds:   cmds,
+		NewTab: newTab,
+	}
+
+	tmpl, err := template.New("applescript-template").
+		Funcs(funcMap).
+		Parse(appleScriptTemplate)
+	if err != nil {
+		return err
 	}
 
 	buf := new(bytes.Buffer)
 	if debug {
 		fmt.Printf("%+v\n", ctx)
 	}
-	if err := t.Execute(buf, ctx); err != nil {
+	if err := tmpl.Execute(buf, ctx); err != nil {
 		return err
 	}
 	if debug {
 		io.Copy(os.Stdout, buf)
 		return nil
 	}
-	tempFile, err := ioutil.TempFile("", "it2open")
-	if err != nil {
-		return errors.Wrap(err, "creating tempFile")
-	}
-	defer os.Remove(tempFile.Name()) // clean up
-	if _, err := io.Copy(tempFile, buf); err != nil {
-		return errors.Wrap(err, "copy to tempFile")
-	}
-	if err := tempFile.Close(); err != nil {
-		log.Fatal(err)
-		return errors.Wrap(err, "closing")
-	}
-	cmd := exec.Command("osascript", tempFile.Name())
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = os.Stdout
-	return errors.Wrap(cmd.Run(), "running osascript")
+	return runAppleScript(buf)
 }
 
 func splitStdin() ([]string, error) {
 	if terminal.IsTerminal(0) {
 		return nil, fmt.Errorf("expecting lines on stdin")
 	}
-	result := []string{}
+	lines := []string{}
 	s := bufio.NewScanner(os.Stdin)
 	for s.Scan() {
-		result = append(result, s.Text())
+		lines = append(lines, s.Text())
 	}
-	if err := s.Err(); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return lines, s.Err()
 }
 
-func mkLayoutCmds(cols, rows int) []string {
-	result := []string{}
-	for i := 0; i < cols; i++ {
-		if i < cols-1 {
-			result = append(result, "d[")
-		}
-		for j := 0; j < rows-1; j++ {
-			result = append(result, "D")
-		}
-		result = append(result, "]")
+func runAppleScript(script *bytes.Buffer) error {
+	tempFile, err := ioutil.TempFile("", "it2open")
+	if err != nil {
+		return errors.Wrap(err, "creating tempFile")
 	}
-	return result
+	defer os.Remove(tempFile.Name()) // clean up
+
+	if _, err := io.Copy(tempFile, script); err != nil {
+		return errors.Wrap(err, "copy to tempFile")
+	}
+
+	if err := tempFile.Close(); err != nil {
+		log.Fatal(err)
+		return errors.Wrap(err, "closing")
+	}
+
+	cmd := exec.Command("osascript", tempFile.Name())
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	return errors.Wrap(cmd.Run(), "running osascript")
 }
+
+// func map:
+var funcMap = template.FuncMap{
+	"sub":  func(a, b int) int { return a - b },
+	"mod":  func(a, b int) int { return a % b },
+	"mul":  func(a, b int) int { return a * b },
+	"add":  func(a, b int) int { return a + b },
+	"ceil": func(a float64) int { return int(math.Ceil(a)) },
+	"div":  func(a, b int) float64 { return float64(a) / float64(b) },
+	"until": func(n int) []int {
+		r := make([]int, n)
+		for i := range r {
+			r[i] = i
+		}
+		return r
+	},
+}
+
+const appleScriptTemplate = `
+tell application "iTerm2"
+	{{ if .NewTab }}tell current window to create tab with default profile{{ end }}
+	{{- $cols := .Cols }}
+	{{- $cmds := .Cmds }}
+	{{- range $i, $cmd := $cmds }}
+		{{- if lt $i $cols }} {{/* For first $cols commands, create vertical splits */}}
+			{{- if gt $i 0 }} {{/* Skip split before first command */}}
+			# virt
+				tell current session of current tab of current window to split vertically with default profile
+				tell application "System Events" to keystroke "]" using {command down}
+				delay {{ $.Delay }}
+			{{- end }}
+		{{- else }} {{/* For every $cols commands thereafter, go to first column and create horizontal split */}}
+			delay {{ $.Delay }}
+			# tab through all the existing splits in the new column
+			{{ range until (sub $i $cols) }}
+			tell application "System Events" to keystroke "]" using {command down}
+			{{- end }}
+			delay {{ $.Delay }}
+			tell current session of current tab of current window to split horizontally with default profile
+			delay {{ $.Delay }}
+		{{- end }}
+		tell current session of current tab of current window to write text "{{ $cmd }}"
+	{{- end }}
+end tell
+`
