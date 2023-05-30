@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"text/template"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/ssh/terminal"
 )
@@ -46,14 +47,15 @@ func run(cols int, newTab bool, delay float64, debug bool) error {
 		Rows   int
 		Delay  float64
 		Cmds   []string
+		Layout [][]string
 		NewTab bool
-	}{
-		Cols:   cols,
-		Rows:   rows,
+	}{Cols: cols, Rows: rows,
 		Delay:  delay,
 		Cmds:   cmds,
+		Layout: distributeCommands(cmds, cols),
 		NewTab: newTab,
 	}
+	spew.Dump(ctx.Cmds)
 
 	tmpl, err := template.New("applescript-template").
 		Funcs(funcMap).
@@ -74,6 +76,21 @@ func run(cols int, newTab bool, delay float64, debug bool) error {
 		return nil
 	}
 	return runAppleScript(buf)
+}
+
+// distributeCommands takes a list of commands and returns a 2D array of commands
+// that can be run in parallel in iTerm2.
+// the first layer in the array is the column, the second layer is the row.
+func distributeCommands(cmds []string, cols int) [][]string {
+	rows := (len(cmds) + cols - 1) / cols
+	r := make([][]string, cols)
+	for i := range r {
+		r[i] = make([]string, rows)
+	}
+	for i, cmd := range cmds {
+		r[i%cols][i/cols] = cmd
+	}
+	return r
 }
 
 func splitStdin() ([]string, error) {
@@ -130,27 +147,28 @@ var funcMap = template.FuncMap{
 const appleScriptTemplate = `
 tell application "iTerm2"
 	{{ if .NewTab }}tell current window to create tab with default profile{{ end }}
-	{{- $cols := .Cols }}
-	{{- $cmds := .Cmds }}
-	{{- range $i, $cmd := $cmds }}
-		{{- if lt $i $cols }} {{/* For first $cols commands, create vertical splits */}}
-			{{- if gt $i 0 }} {{/* Skip split before first command */}}
-			# virt
-				tell current session of current tab of current window to split vertically with default profile
-				tell application "System Events" to keystroke "]" using {command down}
-				delay {{ $.Delay }}
-			{{- end }}
-		{{- else }} {{/* For every $cols commands thereafter, go to first column and create horizontal split */}}
-			delay {{ $.Delay }}
-			# tab through all the existing splits in the new column
-			{{ range until (sub $i $cols) }}
-			tell application "System Events" to keystroke "]" using {command down}
-			{{- end }}
+
+	{{ range until .Cols }}
+		{{- if gt . 0 }}
+        tell current session of current tab of current window to split vertically with default profile
+		{{ end }}
+	{{ end }}
+	delay {{ $.Delay }}
+
+	{{- range $i, $col := .Layout }}
+		{{- range $j := until (sub (len $col) 1) }}
 			delay {{ $.Delay }}
 			tell current session of current tab of current window to split horizontally with default profile
-			delay {{ $.Delay }}
+			tell application "System Events" to keystroke "]" using {command down}
 		{{- end }}
+		tell application "System Events" to keystroke "]" using {command down}
+	{{- end }}
+delay {{ $.Delay }}
+
+	{{- range $i, $cmd := .Cmds }}
 		tell current session of current tab of current window to write text "{{ $cmd }}"
+		tell application "System Events" to keystroke "]" using {command down}
+		delay {{ $.Delay }}
 	{{- end }}
 end tell
 `
